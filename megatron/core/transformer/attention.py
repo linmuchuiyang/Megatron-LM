@@ -88,11 +88,19 @@ if not HAVE_FA3:
     except ImportError as e:
         pass
 
+# Backported from Megatron-LM main: FA4 is tracked by the `flash-attn-4` distribution metadata.
+_MIN_FA4_VERSION = "4.0.0b20"
+flash_attn4_varlen_func = None
 try:
-    from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _get_dist_version
 
-    HAVE_FA4 = True
-except ImportError:
+    from packaging.version import Version as _Version
+
+    HAVE_FA4 = _Version(_get_dist_version("flash-attn-4")) >= _Version(_MIN_FA4_VERSION)
+    if HAVE_FA4:
+        from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
+except (ImportError, PackageNotFoundError):
     HAVE_FA4 = False
 
 try:
