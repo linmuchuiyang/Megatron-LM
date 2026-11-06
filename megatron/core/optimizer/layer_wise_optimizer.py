@@ -1305,8 +1305,16 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
         # helper function to flatten local params, all-gather,
         # unflatten and copy to model params
         def _allgather_helper(params_list, group):
-            device = params_list[0][0].device
-            dtype = params_list[0][0].dtype
+            # Rank 0 may own zero params in this list: the ping-pong assignment and the dtype split
+            # in ``_dispatch`` below both leave per-rank lists that can be empty (e.g. rank 0's share
+            # of a pipeline stage holding keep-in-fp32 tensors only). Take device/dtype from the
+            # first non-empty list, as ``_allgather_helper_fp8`` does, instead of indexing rank 0.
+            first = next((params[0] for params in params_list if len(params) > 0), None)
+            if first is None:
+                # No rank owns any param in this group -> nothing to gather.
+                return
+            device = first.device
+            dtype = first.dtype
             rank = get_pg_rank(group)
             dp_size = get_pg_size(group)
             # Flatten this rank's params.

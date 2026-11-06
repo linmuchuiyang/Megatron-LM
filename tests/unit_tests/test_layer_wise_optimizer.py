@@ -529,6 +529,46 @@ class TestLayerWiseOptimizer:
         reference_model.load_state_dict(model.module.state_dict())
         return reference_model
 
+    def test_allgather_params_when_rank_0_owns_no_bf16_param(self):
+        """The bf16 all-gather helper must not index rank 0's owned list.
+
+        Since the owned params are split by transport dtype, dp_cp rank 0's bf16 list can be
+        empty (its ping-pong share holds only keep-in-fp32 tensors) while other ranks own bf16
+        params; the helper then read ``params_list[0][0]`` and every rank died with IndexError.
+        Each rank holds every param (as under DDP), the owner writes a distinct value, and after
+        ``allgather_params()`` every rank must hold the owner's value for every param.
+        """
+        rank, world = torch.distributed.get_rank(), torch.distributed.get_world_size()
+        device = torch.device('cuda', torch.cuda.current_device())
+
+        def param(shape, dtype):
+            return torch.nn.Parameter(torch.zeros(shape, dtype=dtype, device=device))
+
+        # Ownership: rank 0 -> one fp32 param only; rank 1 -> one bf16 and one fp32 param;
+        # every other rank -> one bf16 param.
+        owned = [(param((64, 16), torch.float32), 0), (param((256, 128), torch.bfloat16), 1)]
+        owned.append((param((4,), torch.float32), 1))
+        owned += [(param((96, 64), torch.bfloat16), owner) for owner in range(2, world)]
+        params_list = [[] for _ in range(world)]
+        for p, owner in owned:
+            params_list[owner].append(p)
+        for index, (p, owner) in enumerate(owned):
+            if owner == rank:
+                p.data.fill_(float(owner + 1) + 0.5 * index)
+
+        optimizer = object.__new__(LayerWiseDistributedOptimizer)
+        optimizer.pg_collection = SimpleNamespace(dp_cp=torch.distributed.group.WORLD, expt_dp=None)
+        optimizer.dp_cp = torch.distributed.group.WORLD
+        optimizer.expt_dp = None
+        optimizer.use_fp8_param_sync = False
+        optimizer.dp_cp_params_list = params_list
+        optimizer.expt_dp_params_list = None
+        optimizer.allgather_params()
+
+        for index, (p, owner) in enumerate(owned):
+            expected = torch.full_like(p, float(owner + 1) + 0.5 * index)
+            torch.testing.assert_close(p.data, expected, rtol=0, atol=0)
+
     @pytest.mark.parametrize('use_param_layout', [False, True])
     def test_basic(self, use_param_layout):
         """Test basic LayerWiseDistributedOptimizer initialization and step with bf16."""
